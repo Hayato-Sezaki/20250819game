@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Escape the Maze</title>
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#121a33;
+      --accent:#6ae8ff;
+      --accent-2:#8bffb0;
+      --danger:#ff6a6a;
+      --ink:#eaf2ff;
+      --muted:#90a0c3;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; 
+      background:radial-gradient(1200px 800px at 25% -10%, #1b2550 0%, #0b1020 60%) fixed;
+      color:var(--ink);
+      display:flex; align-items:center; justify-content:center; padding:24px;
+    }
+    .app{width:min(980px,100%);}
+    .bar{
+      display:flex; gap:16px; align-items:center; justify-content:space-between;
+      background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+      border:1px solid rgba(255,255,255,.08);
+      box-shadow:0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+      border-radius:16px; padding:14px 16px; backdrop-filter: blur(6px);
+    }
+    .title{display:flex; align-items:center; gap:12px; font-weight:700; letter-spacing:.2px}
+    .title .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 10px var(--accent)}
+    .stats{display:flex; gap:18px; flex-wrap:wrap; align-items:center}
+    .stat{font-variant-numeric:tabular-nums; color:var(--muted)}
+    .stat b{color:var(--ink)}
+    .controls{display:flex; gap:10px; align-items:center}
+    button{
+      cursor:pointer; border-radius:12px; border:1px solid rgba(255,255,255,.14);
+      background:linear-gradient(180deg,#17224b,#0e1430); color:var(--ink);
+      padding:10px 14px; font-weight:600; letter-spacing:.2px;
+      box-shadow:0 6px 20px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    button:hover{filter:brightness(1.08)}
+    button:active{transform:translateY(1px)}
+    .hint{color:var(--muted); font-size:12px}
+
+    .board{
+      margin-top:16px; 
+      background:var(--panel);
+      border-radius:20px; padding:16px; border:1px solid rgba(255,255,255,.08);
+      box-shadow:0 20px 60px rgba(0,0,0,.5);
+    }
+
+    .canvas-wrap{position:relative; width:100%; aspect-ratio:1/1;}
+    canvas{position:absolute; inset:0; width:100%; height:100%; display:block; border-radius:14px; background:#0f1731}
+
+    .toast{
+      position:absolute; left:50%; top:16px; transform:translateX(-50%);
+      background:rgba(0,0,0,.5); border:1px solid rgba(255,255,255,.18);
+      padding:8px 12px; border-radius:999px; font-size:12px; color:#cfe3ff;
+      pointer-events:none; opacity:0; transition:opacity .25s ease, transform .25s ease;
+    }
+    .toast.show{opacity:1; transform:translate(-50%, 0)}
+
+    .result{
+      margin-top:12px; font-size:14px; color:var(--muted);
+    }
+    .result .ok{color:var(--accent-2); font-weight:700}
+    .result .bad{color:var(--danger); font-weight:700}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="bar">
+      <div class="title"><span class="dot"></span> Escape the Maze</div>
+      <div class="stats">
+        <div class="stat">⏱ Time: <b id="time">00:00.0</b></div>
+        <div class="stat">👣 Steps: <b id="steps">0</b></div>
+        <div class="stat">🧭 Shortest: <b id="optimal">—</b></div>
+        <div class="stat">⭐ Score: <b id="score">0</b></div>
+      </div>
+      <div class="controls">
+        <button id="replay" title="Generate a new maze (R)">↻ Replay</button>
+      </div>
+    </div>
+    <div class="board">
+      <div class="canvas-wrap">
+        <canvas id="maze"></canvas>
+        <div class="toast" id="toast">Use your ⬆️⬇️⬅️➡️ arrow keys to move</div>
+      </div>
+      <div class="result" id="result">
+        Reach the red goal square starting from the green one. Shortest-path finish grants a <span class="ok">+500</span> bonus.
+        <span class="hint">(Keyboard focus is global; arrow keys won’t scroll the page.)</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    // --- Config ---
+    const COLS = 21;        // must be >= 5; odd looks nice but not required
+    const ROWS = 21;
+    const WALL_THICK = 2;   // wall thickness in device-independent pixels
+
+    // --- State ---
+    let grid = [];          // cells with walls {t,r,b,l}
+    let start = {x:0, y:0};
+    let goal  = {x:COLS-1, y:ROWS-1};
+    let pos   = {x:0, y:0};
+    let steps = 0;
+    let shortestLen = null;
+    let finished = false;
+
+    // Timer state
+    let startTime = null;   // ms epoch when first move starts
+    let endTime = null;
+    let timerId = null;
+
+    // Canvas & DPI
+    const canvas = document.getElementById('maze');
+    const ctx = canvas.getContext('2d');
+    const toast = document.getElementById('toast');
+
+    const $time = document.getElementById('time');
+    const $steps = document.getElementById('steps');
+    const $optimal = document.getElementById('optimal');
+    const $score = document.getElementById('score');
+    const $result = document.getElementById('result');
+    const $replay = document.getElementById('replay');
+
+    function showToast(msg, ms=1800){
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(()=> toast.classList.remove('show'), ms);
+    }
+
+    function idx(x,y){ return y*COLS + x; }
+
+    function neighbors(x,y){
+      const list = [];
+      if(y>0) list.push({x,y:y-1, dir:'t'});
+      if(x<COLS-1) list.push({x:x+1,y, dir:'r'});
+      if(y<ROWS-1) list.push({x,y:y+1, dir:'b'});
+      if(x>0) list.push({x:x-1,y, dir:'l'});
+      return list;
+    }
+
+    function carveMaze(){
+      // Initialize grid with all walls present
+      grid = new Array(COLS*ROWS).fill(null).map(()=>({t:true,r:true,b:true,l:true, v:false}));
+      // Randomized DFS (recursive backtracker)
+      const stack = [{x:start.x, y:start.y}];
+      grid[idx(start.x,start.y)].v = true;
+      while(stack.length){
+        const cur = stack[stack.length-1];
+        // pick unvisited neighbors
+        const nbs = neighbors(cur.x,cur.y).filter(n => !grid[idx(n.x,n.y)].v);
+        if(nbs.length === 0){ stack.pop(); continue; }
+        const n = nbs[Math.floor(Math.random()*nbs.length)];
+        // knock down walls between cur and n
+        const a = grid[idx(cur.x,cur.y)], b = grid[idx(n.x,n.y)];
+        if(n.dir==='t'){ a.t=false; b.b=false; }
+        if(n.dir==='r'){ a.r=false; b.l=false; }
+        if(n.dir==='b'){ a.b=false; b.t=false; }
+        if(n.dir==='l'){ a.l=false; b.r=false; }
+        b.v = true;
+        stack.push({x:n.x,y:n.y});
+      }
+      // Reset visited flags if needed
+      grid.forEach(c=>{c.v=false});
+    }
+
+    function bfsShortest(){
+      const q = [];
+      const dist = new Array(COLS*ROWS).fill(Infinity);
+      const s = idx(start.x,start.y);
+      dist[s] = 0; q.push(s);
+      while(q.length){
+        const u = q.shift();
+        const ux = u % COLS, uy = (u/COLS)|0;
+        const cell = grid[u];
+        // check open walls only
+        if(!cell.t){ const v = idx(ux,uy-1); if(dist[v]===Infinity){ dist[v]=dist[u]+1; q.push(v);} }
+        if(!cell.r){ const v = idx(ux+1,uy); if(dist[v]===Infinity){ dist[v]=dist[u]+1; q.push(v);} }
+        if(!cell.b){ const v = idx(ux,uy+1); if(dist[v]===Infinity){ dist[v]=dist[u]+1; q.push(v);} }
+        if(!cell.l){ const v = idx(ux-1,uy); if(dist[v]===Infinity){ dist[v]=dist[u]+1; q.push(v);} }
+      }
+      const g = idx(goal.x,goal.y);
+      return dist[g]; // number of moves in shortest path
+    }
+
+    // --- Drawing ---
+    function resizeCanvas(){
+      const wrap = canvas.parentElement.getBoundingClientRect();
+      const size = Math.floor(Math.min(wrap.width, wrap.height));
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = size * dpr; canvas.height = size * dpr;
+      canvas.style.width = size + 'px'; canvas.style.height = size + 'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      draw();
+    }
+
+    function draw(){
+      const W = canvas.clientWidth; const H = canvas.clientHeight;
+      ctx.clearRect(0,0,W,H);
+      // Cell sizes
+      const cw = W / COLS; const ch = H / ROWS;
+      // Background grid fill
+      ctx.fillStyle = '#0c1433';
+      ctx.fillRect(0,0,W,H);
+
+      // Start & Goal cells
+      ctx.fillStyle = 'rgba(80, 220, 150, .9)';
+      ctx.fillRect(start.x*cw+1, start.y*ch+1, cw-2, ch-2);
+      ctx.fillStyle = 'rgba(255, 70, 70, .9)';
+      ctx.fillRect(goal.x*cw+1, goal.y*ch+1, cw-2, ch-2);
+
+      // Walls
+      ctx.strokeStyle = '#e5ecff';
+      ctx.lineWidth = WALL_THICK;
+      ctx.lineCap = 'square';
+      ctx.beginPath();
+      const off = (WALL_THICK%2===1?0.5:0); // crisp lines
+      for(let y=0;y<ROWS;y++){
+        for(let x=0;x<COLS;x++){
+          const c = grid[idx(x,y)];
+          const x0 = x*cw, y0 = y*ch, x1 = x0+cw, y1 = y0+ch;
+          if(c.t){ ctx.moveTo(x0+off,y0+off); ctx.lineTo(x1-off,y0+off); }
+          if(c.r){ ctx.moveTo(x1-off,y0+off); ctx.lineTo(x1-off,y1-off); }
+          if(c.b){ ctx.moveTo(x0+off,y1-off); ctx.lineTo(x1-off,y1-off); }
+          if(c.l){ ctx.moveTo(x0+off,y0+off); ctx.lineTo(x0+off,y1-off); }
+        }
+      }
+      ctx.stroke();
+
+      // Avatar
+      const ax = pos.x*cw + cw/2;
+      const ay = pos.y*ch + ch/2;
+      const r = Math.min(cw,ch)*0.28;
+      // halo
+      ctx.beginPath(); ctx.arc(ax,ay,r*1.55,0,Math.PI*2);
+      ctx.fillStyle = 'rgba(106,232,255,.12)'; ctx.fill();
+      // body
+      ctx.beginPath(); ctx.arc(ax,ay,r,0,Math.PI*2);
+      ctx.fillStyle = '#6ae8ff'; ctx.fill();
+      // face/indicator
+      ctx.beginPath(); ctx.arc(ax,ay,r*0.5,0,Math.PI*2);
+      ctx.fillStyle = '#0b1020'; ctx.fill();
+    }
+
+    // --- Timer & Score ---
+    function formatTime(ms){
+      const t = Math.floor(ms);
+      const s = Math.floor(t/1000); const m = Math.floor(s/60);
+      const mm = String(m).padStart(2,'0');
+      const ss = String(s%60).padStart(2,'0');
+      const ds = String(Math.floor((t%1000)/100));
+      return `${mm}:${ss}.${ds}`;
+    }
+
+    function startTimerIfNeeded(){
+      if(startTime!==null) return;
+      startTime = performance.now();
+      timerId = setInterval(()=>{
+        const now = performance.now();
+        $time.textContent = formatTime(now - startTime);
+      }, 80);
+    }
+
+    function stopTimer(){
+      if(timerId){ clearInterval(timerId); timerId = null; }
+      if(startTime!==null && endTime===null){ endTime = performance.now(); }
+    }
+
+    function updateScore(){
+      const elapsed = (endTime && startTime) ? (endTime - startTime) : 0;
+      const base = Math.round(100000 / Math.max(1, elapsed));
+      const bonus = (steps === shortestLen) ? 500 : 0;
+      $score.textContent = String(base + bonus);
+    }
+
+    // --- Movement ---
+    function tryMove(dx,dy){
+      if(finished) return;
+      startTimerIfNeeded();
+      const x = pos.x, y = pos.y;
+      const c = grid[idx(x,y)];
+      if(dx===0 && dy===-1 && !c.t) { pos.y--; steps++; onMove(); return; }
+      if(dx===1  && dy=== 0 && !c.r) { pos.x++; steps++; onMove(); return; }
+      if(dx===0 && dy=== 1 && !c.b) { pos.y++; steps++; onMove(); return; }
+      if(dx===-1 && dy=== 0 && !c.l) { pos.x--; steps++; onMove(); return; }
+      // bump into wall - subtle feedback
+      showToast('🚫 Wall!', 500);
+    }
+
+    function onMove(){
+      $steps.textContent = String(steps);
+      draw();
+      if(pos.x===goal.x && pos.y===goal.y){
+        finished = true;
+        stopTimer();
+        const elapsed = endTime - startTime;
+        const perfect = (steps === shortestLen);
+        updateScore();
+        const msg = perfect
+          ? `You escaped in ${formatTime(elapsed)} with a PERFECT path! +500 bonus`
+          : `You escaped in ${formatTime(elapsed)} (\u2192 ${steps - shortestLen} steps over optimal)`;
+        $result.innerHTML = `<span class="${perfect?'ok':'bad'}">${perfect?'★ Perfect!':'Goal!'}</span> ${msg}`;
+        showToast('🎉 Goal!');
+      }
+    }
+
+    // --- Input ---
+    window.addEventListener('keydown', (e)=>{
+      if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," ","Space"].includes(e.key)) e.preventDefault();
+      if(e.key==="ArrowUp")    tryMove(0,-1);
+      else if(e.key==="ArrowRight") tryMove(1,0);
+      else if(e.key==="ArrowDown")  tryMove(0,1);
+      else if(e.key==="ArrowLeft")  tryMove(-1,0);
+      else if(e.key.toLowerCase()==='r'){ newGame(); }
+    });
+
+    $replay.addEventListener('click', newGame);
+    window.addEventListener('resize', resizeCanvas);
+
+    // --- Game lifecycle ---
+    function newGame(){
+      stopTimer();
+      startTime = null; endTime = null; steps = 0; finished = false;
+      pos = {x:start.x, y:start.y};
+      carveMaze();
+      shortestLen = bfsShortest();
+      // UI
+      $time.textContent = '00:00.0';
+      $steps.textContent = '0';
+      $optimal.textContent = String(shortestLen);
+      $score.textContent = '0';
+      $result.innerHTML = 'Reach the red goal square starting from the green one. Shortest-path finish grants a <span class="ok">+500</span> bonus.';
+      resizeCanvas();
+      showToast('New maze generated!');
+    }
+
+    // Initialize
+    newGame();
+  })();
+  </script>
+</body>
+</html>
